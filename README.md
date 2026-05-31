@@ -15,6 +15,10 @@ Voici la liste des différents fichiers proposés dans INFRASTRUCTURES-0 :
 		<td>Cette commande permet de lancer l'application gestion d'aeroports (Airport Management System).</td>
 	</tr>
 	<tr>
+		<td><b>MALL.PAS</b></td>
+		<td>Cette commande permet de lancer l'application gestion de centre commercial (Mall Management System).</td>
+	</tr>
+	<tr>
       <td><b>PARKING.PAS</b></td>
       <td>Cette commande permet de lancer l'application gestion de stationnement de voiture (Parking Management System).</td>
     </tr>
