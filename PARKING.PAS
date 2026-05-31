@@ -5519,12 +5519,25 @@ Begin
 End;
 
 BEGIN
- InitializeGraphics;
- If MouseDriverFound Then ShowMouse;
- InitState;
- BuildMainMenu;
- RedrawAll;
- MainLoop;
- If MouseDriverFound Then HideMouse;
- CloseGraph;
+ If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')or
+   (ParamStr(1)='/h')or(ParamStr(1)='/H')Then Begin
+  WriteLn('PARKING : Cette commande permet de lancer l''application ',
+                    'gestion de stationnement de voiture ',
+                    '(Parking Management System).');
+  WriteLn;
+  Writeln('Syntaxe : PARKING [/?]');
+  WriteLn;
+  Halt(0);
+ End
+  Else
+ Begin
+  InitializeGraphics;
+  If MouseDriverFound Then ShowMouse;
+  InitState;
+  BuildMainMenu;
+  RedrawAll;
+  MainLoop;
+  If MouseDriverFound Then HideMouse;
+  CloseGraph;
+ End;
 END.
