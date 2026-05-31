@@ -14,4 +14,8 @@ Voici la liste des différents fichiers proposés dans INFRASTRUCTURES-0 :
       <td><b>PARKING.PAS</b></td>
       <td>Cette commande permet de lancer l'application gestion de stationnement de voiture (Parking Management System).</td>
     </tr>
+	<tr>
+		<td><b>PMS.PAS</b></td>
+		<td>Cette commande permet de lancer l'application gestion hoteliere (Property Management System).</td>
+	</tr>
 </table>    
