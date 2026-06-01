@@ -28,6 +28,12 @@ Voici la liste des différents fichiers proposés dans INFRASTRUCTURES-0 :
 	</tr>
 </table>    
 
+<h2>Remarque</h2>
+
+<ul>
+	<li>Le programme MALL.PAS fait des accès directe à des fichiers de base de données de format MySQL.</li>
+</ul>
+
 <h2>Compilation</h2>
 	
 Les fichiers Pascal n'ont aucune dépendances, il suffit de télécharger le fichier désiré et de le compiler avec Free Pascal avec la syntaxe de commande  :
