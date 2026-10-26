@@ -6,6 +6,8 @@
   @description: Clone de l'application TIGRE
 }
 
+{$IFDEF FPC}{$MODE OBJFPC}{$ENDIF}
+
 Program TIGRE;
 
 Uses {$IFDEF FPC}
@@ -16,8 +18,13 @@ Uses {$IFDEF FPC}
 
 Procedure InitializeGraphics;
 Var
+ {$IFDEF FPC}
+ Driver, Mode: SmallInt;
+ ErrCode: SmallInt;
+ {$ELSE}
  Driver, Mode: Integer;
  ErrCode: Integer;
+ {$ENDIF}
 Begin
  {$IFDEF FPC}
   Driver:=VGA;
@@ -120,13 +127,26 @@ Const
  MAX_MENUS            = 8;
  MAX_MENU_ITEMS       = 14;
 
- MAX_NODES            = 640;
- MAX_PIPES            = 800;
- MAX_ESTAB            = 300;
+ { Bornes des tableaux dynamiques (sur le tas, extensibles a la demande).
+   Free Pascal : limite theorique seulement, la memoire disponible decide.
+   Turbo Pascal 7 : segment de 64 Ko, donc bornes reduites. }
+{$IFDEF FPC}
+ MAX_NODES            = 3000000;
+ MAX_PIPES            = 3000000;
+ MAX_ESTAB            = 100000;
+ MAX_EVENTS           = 100000;
+ MAX_INTERV           = 100000;
+ MAX_BG               = 20000;
+ MAX_BGPTS            = 2000000;
+{$ELSE}
+ MAX_NODES            = 400;
+ MAX_PIPES            = 500;
+ MAX_ESTAB            = 200;
  MAX_EVENTS           = 100;
  MAX_INTERV           = 150;
  MAX_BG               = 80;
  MAX_BGPTS            = 2500;
+{$ENDIF}
  MAX_SECTORS          = 24;
  MAX_LISTITEMS        = 400;
  MAX_MEAS             = 24;
@@ -217,7 +237,7 @@ Const
   ============================================================ }
 
 Type
- TStr7   = String[7];
+ TStr7   = String[15];   { identifiants jusqu'a 15 caracteres }
  TStr15  = String[15];
  TStr23  = String[23];
  TStr31  = String[31];
@@ -310,6 +330,10 @@ Type
   A, R, T  : Boolean;    { affiche, reperable, texte }
  End;
 
+ PIntArr    = ^TIntArr;
+ TIntArr    = Array[0..MAX_NODES + MAX_PIPES] Of LongInt;
+ PBoolArr   = ^TBoolArr;
+ TBoolArr   = Array[0..MAX_NODES + MAX_PIPES] Of Boolean;
  PNodeArr   = ^TNodeArr;
  TNodeArr   = Array[0..MAX_NODES - 1] Of TNode;
  PPipeArr   = ^TPipeArr;
@@ -443,14 +467,27 @@ Var
  PlanOrg        : String[31];
  PlanFile       : String[79];
  PlanDirty      : Boolean;
+ LoadTrunc      : Boolean;   { plan tronque : memoire insuffisante }
 
  { Topologie (listes d'adjacence) }
- FirstOut       : Array[0..MAX_NODES - 1] Of Integer;
- FirstIn        : Array[0..MAX_NODES - 1] Of Integer;
- NextOut        : Array[0..MAX_PIPES - 1] Of Integer;
- NextIn         : Array[0..MAX_PIPES - 1] Of Integer;
- TraceNode      : Array[0..MAX_NODES - 1] Of Boolean;
- TracePipe      : Array[0..MAX_PIPES - 1] Of Boolean;
+ FirstOut       : PIntArr;
+ FirstIn        : PIntArr;
+ NextOut        : PIntArr;
+ NextIn         : PIntArr;
+ TraceNode      : PBoolArr;
+ TracePipe      : PBoolArr;
+
+ { Capacites allouees (tas) et index de recherche par identifiant }
+ NodeCap, PipeCap, EstCap, EvCap, IvCap, BgCap, BgPtCap : LongInt;
+ WorkNodeCap, WorkPipeCap : LongInt;
+ HNode          : PIntArr;
+ HNodeSize      : LongInt;
+ HNodeCnt       : LongInt;
+ HNodeOk        : Boolean;
+ HPipe          : PIntArr;
+ HPipeSize      : LongInt;
+ HPipeCnt       : LongInt;
+ HPipeOk        : Boolean;
  TraceActive    : Boolean;
 
  { Vue }
@@ -1822,23 +1859,119 @@ End;
   DONNEES : allocation, hydraulique, lecture / ecriture
   ============================================================ }
 
+{ Agrandit un tableau du tas pour contenir au moins Need elements.
+  Renvoie False si la borne MaxCnt est depassee ou si la memoire manque
+  (le tableau reste alors inchange). Turbo Pascal 7 : allocation fixe. }
+Type
+ PPtrRef = ^Pointer;
+
+Function GrowBuf(Var P; Var Cap: LongInt; Need, ElemSize, MaxCnt: LongInt): Boolean;
+Var
+ NewCap: LongInt;
+ Q: Pointer;
+Begin
+ GrowBuf := False;
+ If Need > MaxCnt Then Exit;
+ If Need <= Cap Then Begin GrowBuf := True; Exit; End;
+ {$IFDEF FPC}
+ NewCap := Cap + Cap Div 2;
+ If NewCap < 1024 Then NewCap := 1024;
+ If NewCap < Need Then NewCap := Need;
+ If NewCap > MaxCnt Then NewCap := MaxCnt;
+ If Int64(NewCap) * ElemSize > 1900000000 Then Exit;
+ Q := PPtrRef(@P)^;
+ ReAllocMem(Q, NewCap * ElemSize);
+ If Q = Nil Then Exit;
+ PPtrRef(@P)^ := Q;
+ {$ELSE}
+ NewCap := MaxCnt;
+ If NewCap * ElemSize > 65000 Then Exit;
+ GetMem(Q, NewCap * ElemSize);
+ PPtrRef(@P)^ := Q;
+ {$ENDIF}
+ Cap := NewCap;
+ GrowBuf := True;
+End;
+
+{ Tableaux de travail (adjacence, traces) : suivent la capacite des ouvrages }
+Procedure EnsureWork;
+Var Old: LongInt; Ok: Boolean;
+Begin
+ Old := WorkNodeCap;
+ Ok := GrowBuf(FirstOut, WorkNodeCap, NodeCap, SizeOf(LongInt), MAX_NODES);
+ WorkNodeCap := Old;
+ Ok := Ok And GrowBuf(FirstIn, WorkNodeCap, NodeCap, SizeOf(LongInt), MAX_NODES);
+ WorkNodeCap := Old;
+ Ok := Ok And GrowBuf(TraceNode, WorkNodeCap, NodeCap, SizeOf(Boolean), MAX_NODES);
+ If Ok And (WorkNodeCap > Old) Then FillChar(TraceNode^[Old], WorkNodeCap - Old, 0);
+ Old := WorkPipeCap;
+ Ok := GrowBuf(NextOut, WorkPipeCap, PipeCap, SizeOf(LongInt), MAX_PIPES);
+ WorkPipeCap := Old;
+ Ok := Ok And GrowBuf(NextIn, WorkPipeCap, PipeCap, SizeOf(LongInt), MAX_PIPES);
+ WorkPipeCap := Old;
+ Ok := Ok And GrowBuf(TracePipe, WorkPipeCap, PipeCap, SizeOf(Boolean), MAX_PIPES);
+ If Ok And (WorkPipeCap > Old) Then FillChar(TracePipe^[Old], WorkPipeCap - Old, 0);
+End;
+
+Function GrowNodes(Need: LongInt): Boolean;
+Begin
+ GrowNodes := GrowBuf(Nodes, NodeCap, Need, SizeOf(TNode), MAX_NODES);
+ If GrowNodes Then EnsureWork;
+End;
+
+Function GrowPipes(Need: LongInt): Boolean;
+Begin
+ GrowPipes := GrowBuf(Pipes, PipeCap, Need, SizeOf(TPipe), MAX_PIPES);
+ If GrowPipes Then EnsureWork;
+End;
+
+Function GrowEstabs(Need: LongInt): Boolean;
+Begin
+ GrowEstabs := GrowBuf(Estabs, EstCap, Need, SizeOf(TEstab), MAX_ESTAB);
+End;
+
+Function GrowEvents(Need: LongInt): Boolean;
+Begin
+ GrowEvents := GrowBuf(Events, EvCap, Need, SizeOf(TEvent), MAX_EVENTS);
+End;
+
+Function GrowIntervs(Need: LongInt): Boolean;
+Begin
+ GrowIntervs := GrowBuf(Intervs, IvCap, Need, SizeOf(TInterv), MAX_INTERV);
+End;
+
+Function GrowBgs(Need: LongInt): Boolean;
+Begin
+ GrowBgs := GrowBuf(Bgs, BgCap, Need, SizeOf(TBgLine), MAX_BG);
+End;
+
+Function GrowBgPts(Need: LongInt): Boolean;
+Begin
+ GrowBgPts := GrowBuf(BgPts, BgPtCap, Need, SizeOf(TPt), MAX_BGPTS);
+End;
+
 Procedure AllocData;
 Begin
- New(Nodes);
- New(Pipes);
- New(Estabs);
- New(Events);
- New(Intervs);
- New(Bgs);
- New(BgPts);
+ Nodes := Nil; Pipes := Nil; Estabs := Nil; Events := Nil;
+ Intervs := Nil; Bgs := Nil; BgPts := Nil;
+ FirstOut := Nil; FirstIn := Nil; NextOut := Nil; NextIn := Nil;
+ TraceNode := Nil; TracePipe := Nil;
+ NodeCap := 0; PipeCap := 0; EstCap := 0; EvCap := 0; IvCap := 0;
+ BgCap := 0; BgPtCap := 0; WorkNodeCap := 0; WorkPipeCap := 0;
+ HNode := Nil; HNodeSize := 0; HNodeCnt := 0; HNodeOk := False;
+ HPipe := Nil; HPipeSize := 0; HPipeCnt := 0; HPipeOk := False;
+ If Not (GrowNodes(1) And GrowPipes(1) And GrowEstabs(1) And GrowEvents(1) And
+         GrowIntervs(1) And GrowBgs(1) And GrowBgPts(1)) Then Begin
+  WriteLn('Memoire insuffisante.');
+  Halt(1);
+ End;
  New(ListBuf);
 End;
 
 Procedure ClearTrace;
-Var I: Integer;
 Begin
- For I := 0 To MAX_NODES - 1 Do TraceNode[I] := False;
- For I := 0 To MAX_PIPES - 1 Do TracePipe[I] := False;
+ If WorkNodeCap > 0 Then FillChar(TraceNode^[0], WorkNodeCap, 0);
+ If WorkPipeCap > 0 Then FillChar(TracePipe^[0], WorkPipeCap, 0);
  TraceActive := False;
 End;
 
@@ -1856,6 +1989,7 @@ Var I: Integer;
 Begin
  NodeCnt := 0; PipeCnt := 0; EstCnt := 0; EvCnt := 0; IvCnt := 0;
  BgCnt := 0; BgPtCnt := 0; SectorCnt := 0;
+ HNodeOk := False; HPipeOk := False;
  For I := 0 To MAX_SECTORS - 1 Do SectorName[I] := '';
  PlanTitle := ''; PlanOrg := 'TIGRE';
  ClearTrace;
@@ -1873,16 +2007,84 @@ Begin
  PadZero := S;
 End;
 
+{$IFDEF FPC}
+Function HashId(Const U: String): LongInt;
+Var I: Integer; H: LongWord;
+Begin
+ H := 2166136261;
+ For I := 1 To Length(U) Do H := (H Xor Ord(U[I])) * 16777619;
+ HashId := LongInt(H And $7FFFFFFF);
+End;
+
+{ Index de hachage (adressage ouvert) des identifiants, reconstruit a la
+  demande des que le plan a change. Une entree vaut indice + 1, 0 = vide. }
+Procedure RebuildNodeIndex;
+Var I, Slot: LongInt; U: String; Dup: Boolean;
+Begin
+ If HNode <> Nil Then FreeMem(HNode);
+ HNodeSize := 1024;
+ While HNodeSize < 2 * NodeCnt + 16 Do HNodeSize := HNodeSize * 2;
+ GetMem(HNode, HNodeSize * SizeOf(LongInt));
+ FillChar(HNode^, HNodeSize * SizeOf(LongInt), 0);
+ For I := 0 To NodeCnt - 1 Do Begin
+  U := UpStr(TrimStr(Nodes^[I].Id));
+  Slot := HashId(U) And (HNodeSize - 1);
+  Dup := False;
+  While HNode^[Slot] <> 0 Do Begin
+   If UpStr(Nodes^[HNode^[Slot] - 1].Id) = U Then Begin Dup := True; Break; End;
+   Slot := (Slot + 1) And (HNodeSize - 1);
+  End;
+  If Not Dup Then HNode^[Slot] := I + 1;
+ End;
+ HNodeCnt := NodeCnt;
+ HNodeOk := True;
+End;
+
+Procedure RebuildPipeIndex;
+Var I, Slot: LongInt; U: String; Dup: Boolean;
+Begin
+ If HPipe <> Nil Then FreeMem(HPipe);
+ HPipeSize := 1024;
+ While HPipeSize < 2 * PipeCnt + 16 Do HPipeSize := HPipeSize * 2;
+ GetMem(HPipe, HPipeSize * SizeOf(LongInt));
+ FillChar(HPipe^, HPipeSize * SizeOf(LongInt), 0);
+ For I := 0 To PipeCnt - 1 Do Begin
+  U := UpStr(TrimStr(Pipes^[I].Id));
+  Slot := HashId(U) And (HPipeSize - 1);
+  Dup := False;
+  While HPipe^[Slot] <> 0 Do Begin
+   If UpStr(Pipes^[HPipe^[Slot] - 1].Id) = U Then Begin Dup := True; Break; End;
+   Slot := (Slot + 1) And (HPipeSize - 1);
+  End;
+  If Not Dup Then HPipe^[Slot] := I + 1;
+ End;
+ HPipeCnt := PipeCnt;
+ HPipeOk := True;
+End;
+{$ENDIF}
+
 Function FindNodeById(Const Id: String): Integer;
 Var I: Integer; U: String;
 Begin
  FindNodeById := -1;
  U := UpStr(TrimStr(Id));
+ {$IFDEF FPC}
+ If (Not HNodeOk) Or (HNodeCnt <> NodeCnt) Then RebuildNodeIndex;
+ I := HashId(U) And (HNodeSize - 1);
+ While HNode^[I] <> 0 Do Begin
+  If UpStr(Nodes^[HNode^[I] - 1].Id) = U Then Begin
+   FindNodeById := HNode^[I] - 1;
+   Exit;
+  End;
+  I := (I + 1) And (HNodeSize - 1);
+ End;
+ {$ELSE}
  For I := 0 To NodeCnt - 1 Do
   If UpStr(Nodes^[I].Id) = U Then Begin
    FindNodeById := I;
    Exit;
   End;
+ {$ENDIF}
 End;
 
 Function FindPipeById(Const Id: String): Integer;
@@ -1890,11 +2092,23 @@ Var I: Integer; U: String;
 Begin
  FindPipeById := -1;
  U := UpStr(TrimStr(Id));
+ {$IFDEF FPC}
+ If (Not HPipeOk) Or (HPipeCnt <> PipeCnt) Then RebuildPipeIndex;
+ I := HashId(U) And (HPipeSize - 1);
+ While HPipe^[I] <> 0 Do Begin
+  If UpStr(Pipes^[HPipe^[I] - 1].Id) = U Then Begin
+   FindPipeById := HPipe^[I] - 1;
+   Exit;
+  End;
+  I := (I + 1) And (HPipeSize - 1);
+ End;
+ {$ELSE}
  For I := 0 To PipeCnt - 1 Do
   If UpStr(Pipes^[I].Id) = U Then Begin
    FindPipeById := I;
    Exit;
   End;
+ {$ENDIF}
 End;
 
 Function ValidNode(I: Integer): Boolean;
@@ -1932,17 +2146,17 @@ Procedure BuildAdjacency;
 Var I: Integer;
 Begin
  For I := 0 To NodeCnt - 1 Do Begin
-  FirstOut[I] := -1;
-  FirstIn[I] := -1;
+  FirstOut^[I] := -1;
+  FirstIn^[I] := -1;
  End;
  For I := 0 To PipeCnt - 1 Do Begin
-  NextOut[I] := -1;
-  NextIn[I] := -1;
+  NextOut^[I] := -1;
+  NextIn^[I] := -1;
   If ValidNode(Pipes^[I].N1) And ValidNode(Pipes^[I].N2) Then Begin
-   NextOut[I] := FirstOut[Pipes^[I].N1];
-   FirstOut[Pipes^[I].N1] := I;
-   NextIn[I] := FirstIn[Pipes^[I].N2];
-   FirstIn[Pipes^[I].N2] := I;
+   NextOut^[I] := FirstOut^[Pipes^[I].N1];
+   FirstOut^[Pipes^[I].N1] := I;
+   NextIn^[I] := FirstIn^[Pipes^[I].N2];
+   FirstIn^[Pipes^[I].N2] := I;
   End;
  End;
 End;
@@ -1999,11 +2213,13 @@ End;
 Procedure ComputeHydraulics;
 Var
  I, K, Head, Tail, OutCnt, D: Integer;
- Queue: Array[0..MAX_NODES - 1] Of Integer;
- InDeg: Array[0..MAX_NODES - 1] Of Integer;
+ Queue: PIntArr;
+ InDeg: PIntArr;
  Tot, Share, A, R, Phi, QR: Real;
 Begin
  BuildAdjacency;
+ GetMem(Queue, (NodeCnt + 1) * SizeOf(LongInt));
+ GetMem(InDeg, (NodeCnt + 1) * SizeOf(LongInt));
  For I := 0 To PipeCnt - 1 Do Begin
   Pipes^[I].Flow := 0;
   Pipes^[I].Fill := 0;
@@ -2022,33 +2238,33 @@ Begin
  End;
  For I := 0 To NodeCnt - 1 Do Begin
   Nodes^[I].Flow := Nodes^[I].Load + 2.78 * 0.6 * RainI * Nodes^[I].Area;
-  InDeg[I] := 0;
+  InDeg^[I] := 0;
  End;
  For I := 0 To EstCnt - 1 Do
   If ValidNode(Estabs^[I].Node) Then
    Nodes^[Estabs^[I].Node].Flow := Nodes^[Estabs^[I].Node].Flow + Estabs^[I].Flow / 86.4;
  For I := 0 To PipeCnt - 1 Do
   If ValidNode(Pipes^[I].N1) And ValidNode(Pipes^[I].N2) Then
-   Inc(InDeg[Pipes^[I].N2]);
+   Inc(InDeg^[Pipes^[I].N2]);
  Head := 0; Tail := 0;
  For I := 0 To NodeCnt - 1 Do
-  If InDeg[I] = 0 Then Begin Queue[Tail] := I; Inc(Tail); End;
+  If InDeg^[I] = 0 Then Begin Queue^[Tail] := I; Inc(Tail); End;
  While Head < Tail Do Begin
-  I := Queue[Head]; Inc(Head);
+  I := Queue^[Head]; Inc(Head);
   OutCnt := 0;
-  K := FirstOut[I];
-  While K >= 0 Do Begin Inc(OutCnt); K := NextOut[K]; End;
+  K := FirstOut^[I];
+  While K >= 0 Do Begin Inc(OutCnt); K := NextOut^[K]; End;
   If OutCnt > 0 Then Begin
    Tot := Nodes^[I].Flow;
    Share := Tot / OutCnt;
-   K := FirstOut[I];
+   K := FirstOut^[I];
    While K >= 0 Do Begin
     Pipes^[K].Flow := Share;
     D := Pipes^[K].N2;
     Nodes^[D].Flow := Nodes^[D].Flow + Share;
-    Dec(InDeg[D]);
-    If InDeg[D] = 0 Then Begin Queue[Tail] := D; Inc(Tail); End;
-    K := NextOut[K];
+    Dec(InDeg^[D]);
+    If InDeg^[D] = 0 Then Begin Queue^[Tail] := D; Inc(Tail); End;
+    K := NextOut^[K];
    End;
   End;
  End;
@@ -2062,6 +2278,8 @@ Begin
    Else Pipes^[I].Vel := 0;
   End;
  End;
+ FreeMem(Queue);
+ FreeMem(InDeg);
 End;
 
 { ============================================================
@@ -2149,6 +2367,11 @@ Begin
  StripEol := S;
 End;
 
+{$IFDEF FPC}
+Var
+ LoadBuf: Array[0..65535] Of Byte;
+{$ENDIF}
+
 Function LoadPlan(FName: String): Boolean;
 Var
  F: Text;
@@ -2159,10 +2382,14 @@ Begin
  LoadPlan := False;
  {$I-}
  Assign(F, FName);
+ {$IFDEF FPC}
+ SetTextBuf(F, LoadBuf);
+ {$ENDIF}
  Reset(F);
  {$I+}
  If IOResult <> 0 Then Exit;
  ClearData;
+ LoadTrunc := False;
  PlanFile := FName;
  Done := False;
  While (Not Eof(F)) And (Not Done) Do Begin
@@ -2183,7 +2410,8 @@ Begin
      If N + 1 > SectorCnt Then SectorCnt := N + 1;
     End;
    End
-   Else If (T = 'N') And (NodeCnt < MAX_NODES) Then Begin
+   Else If (T = 'N') And (Not GrowNodes(NodeCnt + 1)) Then LoadTrunc := True
+   Else If T = 'N' Then Begin
     With Nodes^[NodeCnt] Do Begin
      Id := NextField(L);
      X := StrToRealDef(NextField(L), 0);
@@ -2202,7 +2430,8 @@ Begin
     End;
     Inc(NodeCnt);
    End
-   Else If (T = 'P') And (PipeCnt < MAX_PIPES) Then Begin
+   Else If (T = 'P') And (Not GrowPipes(PipeCnt + 1)) Then LoadTrunc := True
+   Else If T = 'P' Then Begin
     With Pipes^[PipeCnt] Do Begin
      Id := NextField(L);
      S1 := NextField(L);
@@ -2224,7 +2453,8 @@ Begin
     If ValidNode(Pipes^[PipeCnt].N1) And ValidNode(Pipes^[PipeCnt].N2) Then
      Inc(PipeCnt);
    End
-   Else If (T = 'S') And (BgCnt < MAX_BG) Then Begin
+   Else If (T = 'S') And (Not GrowBgs(BgCnt + 1)) Then LoadTrunc := True
+   Else If T = 'S' Then Begin
     With Bgs^[BgCnt] Do Begin
      Kind := IClamp(StrToIntDef(NextField(L), 0), 0, 2);
      Width := StrToIntDef(NextField(L), 0);
@@ -2234,13 +2464,15 @@ Begin
     End;
     Inc(BgCnt);
    End
-   Else If (T = 'Q') And (BgCnt > 0) And (BgPtCnt < MAX_BGPTS) Then Begin
+   Else If (T = 'Q') And (BgCnt > 0) And (Not GrowBgPts(BgPtCnt + 1)) Then LoadTrunc := True
+   Else If (T = 'Q') And (BgCnt > 0) Then Begin
     BgPts^[BgPtCnt].X := Round(StrToRealDef(NextField(L), 0));
     BgPts^[BgPtCnt].Y := Round(StrToRealDef(NextField(L), 0));
     Inc(BgPtCnt);
     Inc(Bgs^[BgCnt - 1].Count);
    End
-   Else If (T = 'E') And (EstCnt < MAX_ESTAB) Then Begin
+   Else If (T = 'E') And (Not GrowEstabs(EstCnt + 1)) Then LoadTrunc := True
+   Else If T = 'E' Then Begin
     With Estabs^[EstCnt] Do Begin
      Name := NextField(L);
      Sap := NextField(L);
@@ -2252,7 +2484,8 @@ Begin
     End;
     Inc(EstCnt);
    End
-   Else If (T = 'V') And (EvCnt < MAX_EVENTS) Then Begin
+   Else If (T = 'V') And (Not GrowEvents(EvCnt + 1)) Then LoadTrunc := True
+   Else If T = 'V' Then Begin
     With Events^[EvCnt] Do Begin
      Id := NextField(L);
      Kind := IClamp(StrToIntDef(NextField(L), 0), 0, 5);
@@ -2268,7 +2501,8 @@ Begin
     End;
     Inc(EvCnt);
    End
-   Else If (T = 'I') And (IvCnt < MAX_INTERV) Then Begin
+   Else If (T = 'I') And (Not GrowIntervs(IvCnt + 1)) Then LoadTrunc := True
+   Else If T = 'I' Then Begin
     With Intervs^[IvCnt] Do Begin
      Id := NextField(L);
      Kind := IClamp(StrToIntDef(NextField(L), 0), 0, 5);
@@ -2406,6 +2640,7 @@ Begin
  Nodes^[20].Kind := NK_BASSIN;
  Nodes^[20].Id := 'B0021';
  Nodes^[20].Name := 'Bassin demo';
+ HNodeOk := False;
  PipeCnt := 0;
  For J := 0 To 5 Do
   For I := 0 To 7 Do Begin
@@ -2522,7 +2757,7 @@ Function AddNodeAt(PX, PY: Real; Kind: Integer): Integer;
 Var Best: Integer;
 Begin
  AddNodeAt := -1;
- If NodeCnt >= MAX_NODES Then Exit;
+ If Not GrowNodes(NodeCnt + 1) Then Exit;
  Best := NearestNode(PX, PY);
  With Nodes^[NodeCnt] Do Begin
   Id := NewNodeId(Kind);
@@ -2559,7 +2794,8 @@ Function AddPipeBetween(A, B: Integer): Integer;
 Var T: Integer;
 Begin
  AddPipeBetween := -1;
- If (PipeCnt >= MAX_PIPES) Or (A = B) Or (Not ValidNode(A)) Or (Not ValidNode(B)) Then Exit;
+ If (A = B) Or (Not ValidNode(A)) Or (Not ValidNode(B)) Then Exit;
+ If Not GrowPipes(PipeCnt + 1) Then Exit;
  If PipeExists(A, B) Then Exit;
  If Nodes^[A].Radier < Nodes^[B].Radier Then Begin T := A; A := B; B := T; End;
  With Pipes^[PipeCnt] Do Begin
@@ -2580,6 +2816,7 @@ Begin
  If Not ValidPipe(I) Then Exit;
  For J := I To PipeCnt - 2 Do Pipes^[J] := Pipes^[J + 1];
  Dec(PipeCnt);
+ HPipeOk := False;
  For J := 0 To EvCnt - 1 Do
   If Events^[J].TKind = 2 Then Begin
    If Events^[J].TIdx = I Then Begin Events^[J].TKind := 0; Events^[J].TIdx := -1; End
@@ -2602,6 +2839,7 @@ Begin
   If (Pipes^[J].N1 = I) Or (Pipes^[J].N2 = I) Then DeletePipe(J);
  For J := I To NodeCnt - 2 Do Nodes^[J] := Nodes^[J + 1];
  Dec(NodeCnt);
+ HNodeOk := False;
  For J := 0 To PipeCnt - 1 Do Begin
   If Pipes^[J].N1 > I Then Dec(Pipes^[J].N1);
   If Pipes^[J].N2 > I Then Dec(Pipes^[J].N2);
@@ -2657,44 +2895,46 @@ End;
 
 Procedure TraceFrom(Start, Dir: Integer; Var NN, NP: Integer; Var Len: Real);
 Var
- Queue: Array[0..MAX_NODES - 1] Of Integer;
+ Queue: PIntArr;
  Head, Tail, N, K, M: Integer;
 Begin
  NN := 0; NP := 0; Len := 0;
  If Not ValidNode(Start) Then Exit;
+ GetMem(Queue, (NodeCnt + 1) * SizeOf(LongInt));
  Head := 0; Tail := 0;
- Queue[Tail] := Start; Inc(Tail);
- TraceNode[Start] := True;
+ Queue^[Tail] := Start; Inc(Tail);
+ TraceNode^[Start] := True;
  NN := 1;
  While Head < Tail Do Begin
-  N := Queue[Head]; Inc(Head);
+  N := Queue^[Head]; Inc(Head);
   If Dir >= 0 Then Begin
-   K := FirstOut[N];
+   K := FirstOut^[N];
    While K >= 0 Do Begin
-    If Not TracePipe[K] Then Begin
-     TracePipe[K] := True; Inc(NP); Len := Len + Pipes^[K].Len;
+    If Not TracePipe^[K] Then Begin
+     TracePipe^[K] := True; Inc(NP); Len := Len + Pipes^[K].Len;
     End;
     M := Pipes^[K].N2;
-    If Not TraceNode[M] Then Begin
-     TraceNode[M] := True; Inc(NN); Queue[Tail] := M; Inc(Tail);
+    If Not TraceNode^[M] Then Begin
+     TraceNode^[M] := True; Inc(NN); Queue^[Tail] := M; Inc(Tail);
     End;
-    K := NextOut[K];
+    K := NextOut^[K];
    End;
   End;
   If Dir <= 0 Then Begin
-   K := FirstIn[N];
+   K := FirstIn^[N];
    While K >= 0 Do Begin
-    If Not TracePipe[K] Then Begin
-     TracePipe[K] := True; Inc(NP); Len := Len + Pipes^[K].Len;
+    If Not TracePipe^[K] Then Begin
+     TracePipe^[K] := True; Inc(NP); Len := Len + Pipes^[K].Len;
     End;
     M := Pipes^[K].N1;
-    If Not TraceNode[M] Then Begin
-     TraceNode[M] := True; Inc(NN); Queue[Tail] := M; Inc(Tail);
+    If Not TraceNode^[M] Then Begin
+     TraceNode^[M] := True; Inc(NN); Queue^[Tail] := M; Inc(Tail);
     End;
-    K := NextIn[K];
+    K := NextIn^[K];
    End;
   End;
  End;
+ FreeMem(Queue);
  TraceActive := True;
 End;
 
@@ -2713,8 +2953,8 @@ End;
 Procedure SelectFromTrace;
 Var I: Integer;
 Begin
- For I := 0 To NodeCnt - 1 Do Nodes^[I].Sel := TraceNode[I];
- For I := 0 To PipeCnt - 1 Do Pipes^[I].Sel := TracePipe[I];
+ For I := 0 To NodeCnt - 1 Do Nodes^[I].Sel := TraceNode^[I];
+ For I := 0 To PipeCnt - 1 Do Pipes^[I].Sel := TracePipe^[I];
 End;
 
 Function SelCount: Integer;
@@ -3008,7 +3248,7 @@ Begin
   End;
  { traces et selection (par dessus) }
  For I := 0 To PipeCnt - 1 Do Begin
-  If TraceActive And TracePipe[I] Then Begin
+  If TraceActive And TracePipe^[I] Then Begin
    W2S(Nodes^[Pipes^[I].N1].X, Nodes^[Pipes^[I].N1].Y, X1, Y1);
    W2S(Nodes^[Pipes^[I].N2].X, Nodes^[Pipes^[I].N2].Y, X2, Y2);
    SetColor(CLR_TRACE);
@@ -3089,7 +3329,7 @@ Begin
      OutTextXY(X + 6, Y - 4, S);
     End;
    End;
-   If TraceActive And TraceNode[I] Then Begin
+   If TraceActive And TraceNode^[I] Then Begin
     SetColor(CLR_TRACE);
     Circle(X, Y, 4);
    End;
@@ -3785,7 +4025,7 @@ Var
 Begin
  N := 0; MinX := 0; MaxX := 0; MinY := 0; MaxY := 0;
  For I := 0 To NodeCnt - 1 Do
-  If Nodes^[I].Sel Or (TraceActive And TraceNode[I]) Then Add(Nodes^[I].X, Nodes^[I].Y);
+  If Nodes^[I].Sel Or (TraceActive And TraceNode^[I]) Then Add(Nodes^[I].X, Nodes^[I].Y);
  If N = 0 Then Begin
   If (SelKind <> SEL_NONE) Then GotoObject(SelKind, SelIdx)
   Else SetStatus('Rien a cadrer : aucune selection.');
@@ -3847,7 +4087,7 @@ Begin
  R := DlgRun(Dlg);
  If R = 1 Then Begin
   S := UpStr(TrimStr(Dlg.Ctrls[eId].Text));
-  If (S <> '') And ((FindNodeById(S) < 0) Or (FindNodeById(S) = I)) Then Nodes^[I].Id := S
+  If (S <> '') And ((FindNodeById(S) < 0) Or (FindNodeById(S) = I)) Then Begin Nodes^[I].Id := S; HNodeOk := False; End
   Else ShowMessageBox('Identifiant', 'Identifiant vide ou deja utilise : conserve.');
   Nodes^[I].Name := Dlg.Ctrls[eName].Text;
   Nodes^[I].Cote := StrToRealDef(Dlg.Ctrls[eCote].Text, Nodes^[I].Cote);
@@ -3909,7 +4149,7 @@ Begin
  R := DlgRun(Dlg);
  If R = 1 Then Begin
   S := UpStr(TrimStr(Dlg.Ctrls[eId].Text));
-  If (S <> '') And ((FindPipeById(S) < 0) Or (FindPipeById(S) = I)) Then Pipes^[I].Id := S
+  If (S <> '') And ((FindPipeById(S) < 0) Or (FindPipeById(S) = I)) Then Begin Pipes^[I].Id := S; HPipeOk := False; End
   Else ShowMessageBox('Identifiant', 'Identifiant vide ou deja utilise : conserve.');
   Pipes^[I].Diam := IClamp(StrToIntDef(Dlg.Ctrls[eDiam].Text, Pipes^[I].Diam), 50, 9000);
   Pipes^[I].Width := IClamp(StrToIntDef(Dlg.Ctrls[eWid].Text, Pipes^[I].Width), 50, 12000);
@@ -3968,7 +4208,7 @@ Begin
    ShowMessageBox('Etablissement', 'Regard introuvable : ' + Dlg.Ctrls[eNode].Text);
    Exit;
   End;
-  If (Idx >= EstCnt) And (EstCnt >= MAX_ESTAB) Then Begin
+  If (Idx >= EstCnt) And (Not GrowEstabs(EstCnt + 1)) Then Begin
    ShowMessageBox('Etablissement', 'Nombre maximal d''etablissements atteint.');
    Exit;
   End;
@@ -3998,7 +4238,7 @@ Begin
  DlgEvent := False;
  If Idx < EvCnt Then E := Events^[Idx]
  Else Begin
-  If EvCnt >= MAX_EVENTS Then Begin
+  If Not GrowEvents(EvCnt + 1) Then Begin
    ShowMessageBox('Evenement', 'Nombre maximal d''evenements atteint.');
    Exit;
   End;
@@ -4047,7 +4287,7 @@ Begin
  DlgInterv := False;
  If Idx < IvCnt Then V := Intervs^[Idx]
  Else Begin
-  If IvCnt >= MAX_INTERV Then Begin
+  If Not GrowIntervs(IvCnt + 1) Then Begin
    ShowMessageBox('Intervention', 'Nombre maximal d''interventions atteint.');
    Exit;
   End;
@@ -4155,7 +4395,7 @@ Begin
  If Q = '' Then Exit;
  ListClear;
  For I := 0 To BgCnt - 1 Do
-  If (Bgs^[I].Kind <> 2) And ContainsText(Bgs^[I].Name, Q) And (ListCnt < MAX_BG) Then Begin
+  If (Bgs^[I].Kind <> 2) And ContainsText(Bgs^[I].Name, Q) And (ListCnt < MAX_LISTITEMS) Then Begin
    Hits[ListCnt] := I;
    ListAdd(Bgs^[I].Name);
   End;
@@ -4390,67 +4630,73 @@ End;
 Procedure BuildConnectivity;
 Var
  I, K, Comp, Head, Tail, N, NoOut, Isolated, Outf, Done: Integer;
- Mark: Array[0..MAX_NODES - 1] Of Integer;
- Queue: Array[0..MAX_NODES - 1] Of Integer;
- InDeg: Array[0..MAX_NODES - 1] Of Integer;
+ Mark: PIntArr;
+ Queue: PIntArr;
+ InDeg: PIntArr;
  M: Integer;
  Bad: Integer;
 Begin
  BuildAdjacency;
  ClearTrace;
- For I := 0 To NodeCnt - 1 Do Begin Mark[I] := 0; InDeg[I] := 0; End;
+ GetMem(Mark, (NodeCnt + 1) * SizeOf(LongInt));
+ GetMem(Queue, (NodeCnt + 1) * SizeOf(LongInt));
+ GetMem(InDeg, (NodeCnt + 1) * SizeOf(LongInt));
+ For I := 0 To NodeCnt - 1 Do Begin Mark^[I] := 0; InDeg^[I] := 0; End;
  Comp := 0;
  For I := 0 To NodeCnt - 1 Do
-  If Mark[I] = 0 Then Begin
+  If Mark^[I] = 0 Then Begin
    Inc(Comp);
    Head := 0; Tail := 0;
-   Queue[Tail] := I; Inc(Tail); Mark[I] := Comp;
+   Queue^[Tail] := I; Inc(Tail); Mark^[I] := Comp;
    While Head < Tail Do Begin
-    N := Queue[Head]; Inc(Head);
-    K := FirstOut[N];
+    N := Queue^[Head]; Inc(Head);
+    K := FirstOut^[N];
     While K >= 0 Do Begin
      M := Pipes^[K].N2;
-     If Mark[M] = 0 Then Begin Mark[M] := Comp; Queue[Tail] := M; Inc(Tail); End;
-     K := NextOut[K];
+     If Mark^[M] = 0 Then Begin Mark^[M] := Comp; Queue^[Tail] := M; Inc(Tail); End;
+     K := NextOut^[K];
     End;
-    K := FirstIn[N];
+    K := FirstIn^[N];
     While K >= 0 Do Begin
      M := Pipes^[K].N1;
-     If Mark[M] = 0 Then Begin Mark[M] := Comp; Queue[Tail] := M; Inc(Tail); End;
-     K := NextIn[K];
+     If Mark^[M] = 0 Then Begin Mark^[M] := Comp; Queue^[Tail] := M; Inc(Tail); End;
+     K := NextIn^[K];
     End;
    End;
   End;
  NoOut := 0; Isolated := 0; Outf := 0; Bad := 0;
  For I := 0 To NodeCnt - 1 Do Begin
   If Nodes^[I].Kind = NK_EXUTOIRE Then Inc(Outf);
-  If (FirstOut[I] < 0) And (FirstIn[I] < 0) Then Begin
+  If (FirstOut^[I] < 0) And (FirstIn^[I] < 0) Then Begin
    Inc(Isolated);
-   TraceNode[I] := True;
-  End Else If (FirstOut[I] < 0) And (Nodes^[I].Kind <> NK_EXUTOIRE) Then Begin
+   TraceNode^[I] := True;
+  End Else If (FirstOut^[I] < 0) And (Nodes^[I].Kind <> NK_EXUTOIRE) Then Begin
    Inc(NoOut);
-   TraceNode[I] := True;
+   TraceNode^[I] := True;
   End;
  End;
  For I := 0 To PipeCnt - 1 Do Begin
-  Inc(InDeg[Pipes^[I].N2]);
-  If Pipes^[I].Slope < 0 Then Begin Inc(Bad); TracePipe[I] := True; End;
+  Inc(InDeg^[Pipes^[I].N2]);
+  If Pipes^[I].Slope < 0 Then Begin Inc(Bad); TracePipe^[I] := True; End;
  End;
  { detection de cycles : algorithme de Kahn }
  Head := 0; Tail := 0;
  For I := 0 To NodeCnt - 1 Do
-  If InDeg[I] = 0 Then Begin Queue[Tail] := I; Inc(Tail); End;
+  If InDeg^[I] = 0 Then Begin Queue^[Tail] := I; Inc(Tail); End;
  Done := 0;
  While Head < Tail Do Begin
-  N := Queue[Head]; Inc(Head); Inc(Done);
-  K := FirstOut[N];
+  N := Queue^[Head]; Inc(Head); Inc(Done);
+  K := FirstOut^[N];
   While K >= 0 Do Begin
    M := Pipes^[K].N2;
-   Dec(InDeg[M]);
-   If InDeg[M] = 0 Then Begin Queue[Tail] := M; Inc(Tail); End;
-   K := NextOut[K];
+   Dec(InDeg^[M]);
+   If InDeg^[M] = 0 Then Begin Queue^[Tail] := M; Inc(Tail); End;
+   K := NextOut^[K];
   End;
  End;
+ FreeMem(Mark);
+ FreeMem(Queue);
+ FreeMem(InDeg);
  TraceActive := True;
  ListClear;
  ListAdd('Controle de connectivite du reseau');
@@ -4472,7 +4718,7 @@ Begin
   ListAdd('Regards sans issue aval :');
   K := 0;
   For I := 0 To NodeCnt - 1 Do
-   If TraceNode[I] And (FirstOut[I] < 0) And (FirstIn[I] >= 0) And (K < 40) Then Begin
+   If TraceNode^[I] And (FirstOut^[I] < 0) And (FirstIn^[I] >= 0) And (K < 40) Then Begin
     ListAdd('  ' + Nodes^[I].Id + ' ' + Nodes^[I].Name);
     Inc(K);
    End;
@@ -4487,7 +4733,7 @@ Begin
  N := 0;
  For I := 0 To PipeCnt - 1 Do Begin
   If (Pipes^[I].Slope < 0.0005) Or (Pipes^[I].Slope > 0.05) Then Begin
-   TracePipe[I] := True;
+   TracePipe^[I] := True;
    Inc(N);
    If Pipes^[I].Slope < 0 Then
     ListAddObj(PadRight(Pipes^[I].Id, 7) + 'PENTE INVERSE ' + RealToStr(Pipes^[I].Slope * 100, 6, 3) + '% L=' +
@@ -4591,11 +4837,11 @@ Begin
    LineKV('Debit sanitaire local', RealToStr(Nodes^[I].Load, 0, 2) + ' L/s');
    LineKV('Bassin versant local', RealToStr(Nodes^[I].Area, 0, 2) + ' ha');
    LineKV('Debit en transit', RealToStr(Nodes^[I].Flow, 0, 1) + ' L/s');
-   C := 0; K := FirstIn[I];
-   While K >= 0 Do Begin Inc(C); K := NextIn[K]; End;
+   C := 0; K := FirstIn^[I];
+   While K >= 0 Do Begin Inc(C); K := NextIn^[K]; End;
    LineKV('Troncons amont', IntToStr(C));
-   C := 0; K := FirstOut[I];
-   While K >= 0 Do Begin Inc(C); K := NextOut[K]; End;
+   C := 0; K := FirstOut^[I];
+   While K >= 0 Do Begin Inc(C); K := NextOut^[K]; End;
    LineKV('Troncons aval', IntToStr(C));
    ListAdd('');
    ListAdd('Etablissements raccordes :');
@@ -4758,7 +5004,7 @@ Var I, N, J: Integer; Has: Boolean;
 Begin
  N := 0;
  For I := 0 To PipeCnt - 1 Do
-  If (Pipes^[I].State >= 2) And (IvCnt < MAX_INTERV) Then Begin
+  If (Pipes^[I].State >= 2) And GrowIntervs(IvCnt + 1) Then Begin
    Has := False;
    For J := 0 To IvCnt - 1 Do
     If (Intervs^[J].TKind = 2) And (Intervs^[J].TIdx = I) And (Intervs^[J].Status < 2) Then Has := True;
@@ -6201,6 +6447,7 @@ Begin
  If Not Loaded Then GenerateDemo;
  FinishLoad;
  StatusMsg := PlanTitle;
+ If LoadTrunc Then StatusMsg := 'ATTENTION : plan tronque (memoire insuffisante)';
 End;
 
 BEGIN
