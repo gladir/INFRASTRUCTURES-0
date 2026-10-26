@@ -36,12 +36,12 @@ Voici la liste des différents fichiers proposés dans INFRASTRUCTURES-0 :
 
 <ul>
 	<li>Le programme MALL.PAS fait des accès directe à des fichiers de base de données de format MySQL.</li>
-	<li>Le programme TIGRE.PAS lit et écrit des plans d'égouts au format texte <code>.TGR</code>. Des exemples (Paris, Montréal et Londres) se trouvent dans le dossier <code>SAMPLES/TIGRE</code>. Ces données sont fictives et illustratives. Si aucun plan n'est trouvé, un petit réseau de démonstration est généré.</li>
+	<li>Le programme TIGRE.PAS lit et écrit des plans d'égouts au format texte <code>.TGR</code>. Des exemples se trouvent dans le dossier <code>SAMPLES/TIGRE</code> : Paris, Montréal, Londres, Laval (Québec), Québec (Québec), New York (États-Unis), Los Angeles (États-Unis), Toronto (Canada) et Ottawa (Canada). Ces données sont fictives et illustratives. Si aucun plan n'est trouvé, un petit réseau de démonstration est généré.</li>
 </ul>
 
 <h2>Utilisation de TIGRE</h2>
 
-<pre><b>TIGRE</b> [<i>FICHIER.TGR</i> | PARIS | MONTREAL | LONDON]</pre>
+<pre><b>TIGRE</b> [<i>FICHIER.TGR</i> | PARIS | MONTREAL | LONDON | LAVAL | QUEBEC | NEWYORK | LOSANGELES | TORONTO | OTTAWA]</pre>
 
 <ul>
 	<li>Clic gauche : outil actif (sélection, déplacement, zoom fenêtre, mesure, ajout de regard ou de tronçon), double-clic : propriétés de l'ouvrage.</li>

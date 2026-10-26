@@ -6188,6 +6188,9 @@ Begin
   If Pos('.', Arg) = 0 Then Begin
    Arg := UpStr(Arg);
    If Arg = 'LONDRES' Then Arg := 'LONDON';
+   If (Arg = 'NEW-YORK') Or (Arg = 'NEW_YORK') Or (Arg = 'NY') Then Arg := 'NEWYORK';
+   If (Arg = 'LOS-ANGELES') Or (Arg = 'LOS_ANGELES') Or (Arg = 'LA') Then Arg := 'LOSANGELES';
+   If (Arg = 'QUEBEC-CITY') Or (Arg = 'VILLE-DE-QUEBEC') Then Arg := 'QUEBEC';
    Loaded := LoadPlan(SamplesDir + Arg + '.TGR');
    If Not Loaded Then Loaded := LoadPlan(Arg + '.TGR');
   End Else Loaded := LoadPlan(Arg);
@@ -6207,7 +6210,9 @@ BEGIN
                    'de gestion du reseau des egouts ',
                    '(Traitement Informatise de la Gestion du Reseau des Egouts).');
   WriteLn;
-  WriteLn('Syntaxe : TIGRE [fichier.TGR | PARIS | MONTREAL | LONDON] [/?]');
+  WriteLn('Syntaxe : TIGRE [fichier.TGR | ville] [/?]');
+  WriteLn('Villes : PARIS, MONTREAL, LONDON, LAVAL, NEWYORK, LOSANGELES, TORONTO,');
+  WriteLn('         OTTAWA, QUEBEC');
   WriteLn;
   Halt(0);
  End
