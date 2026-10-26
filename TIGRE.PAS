@@ -330,10 +330,17 @@ Type
   A, R, T  : Boolean;    { affiche, reperable, texte }
  End;
 
+{$IFDEF FPC}
+ PIntArr    = ^TIntArr;
+ TIntArr    = Array[0..33554431] Of LongInt;
+ PBoolArr   = ^TBoolArr;
+ TBoolArr   = Array[0..33554431] Of Boolean;
+{$ELSE}
  PIntArr    = ^TIntArr;
  TIntArr    = Array[0..MAX_NODES + MAX_PIPES] Of LongInt;
  PBoolArr   = ^TBoolArr;
  TBoolArr   = Array[0..MAX_NODES + MAX_PIPES] Of Boolean;
+{$ENDIF}
  PNodeArr   = ^TNodeArr;
  TNodeArr   = Array[0..MAX_NODES - 1] Of TNode;
  PPipeArr   = ^TPipeArr;
@@ -2009,10 +2016,10 @@ End;
 
 {$IFDEF FPC}
 Function HashId(Const U: String): LongInt;
-Var I: Integer; H: LongWord;
+Var I: Integer; H: Int64;
 Begin
  H := 2166136261;
- For I := 1 To Length(U) Do H := (H Xor Ord(U[I])) * 16777619;
+ For I := 1 To Length(U) Do H := ((H Xor Ord(U[I])) * 16777619) And $FFFFFFFF;
  HashId := LongInt(H And $7FFFFFFF);
 End;
 
